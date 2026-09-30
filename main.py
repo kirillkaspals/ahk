@@ -1,16 +1,22 @@
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Request, Form
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 import sqlite3
 
 app = FastAPI()
+templates = Jinja2Templates(directory="templates")
 
-# Инициализация базы данных
+# Пароль администратора для входа в веб-панель
+ADMIN_PASSWORD = "supersecretpassword"
+
 def init_db():
     conn = sqlite3.connect("licenses.db")
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             hwid TEXT PRIMARY KEY,
+            note TEXT,
             is_active INTEGER DEFAULT 1
         )
     """)
@@ -19,12 +25,12 @@ def init_db():
 
 init_db()
 
-class HWIDRequest(BaseModel):
+class HWIDCheck(BaseModel):
     hwid: str
 
-# Эндпоинт проверки лицензии AHK-скриптом
+# API для AHK скрипта
 @app.post("/api/verify")
-def verify_license(data: HWIDRequest):
+def verify_license(data: HWIDCheck):
     conn = sqlite3.connect("licenses.db")
     cursor = conn.cursor()
     cursor.execute("SELECT is_active FROM users WHERE hwid = ?", (data.hwid,))
@@ -32,18 +38,32 @@ def verify_license(data: HWIDRequest):
     conn.close()
 
     if row and row[0] == 1:
-        return {"status": "success", "access": True}
-    return {"status": "error", "access": False}
+        return {"access": True}
+    return {"access": False}
 
-# Эндпоинт для администратора (добавление HWID)
-@app.post("/admin/add_user")
-def add_user(data: HWIDRequest, admin_key: str = Header(None)):
-    if admin_key != "SECRET_ADMIN_KEY":  # Замените на свой секретный ключ
-        raise HTTPException(status_code=403, detail="Forbidden")
+# Страница администратора
+@app.get("/admin", response_class=HTMLResponse)
+def admin_page(request: Request, key: str = ""):
+    if key != ADMIN_PASSWORD:
+        return "Неверный ключ доступа."
     
     conn = sqlite3.connect("licenses.db")
     cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO users (hwid, is_active) VALUES (?, 1)", (data.hwid,))
+    cursor.execute("SELECT hwid, note, is_active FROM users")
+    users = cursor.fetchall()
+    conn.close()
+    
+    return templates.TemplateResponse("admin.html", {"request": request, "users": users, "key": key})
+
+# Добавление/Обновление пользователя
+@app.post("/admin/add")
+def add_user(key: str = Form(...), hwid: str = Form(...), note: str = Form(...)):
+    if key != ADMIN_PASSWORD:
+        raise HTTPException(status_code=403)
+    
+    conn = sqlite3.connect("licenses.db")
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO users (hwid, note, is_active) VALUES (?, ?, 1)", (hwid, note))
     conn.commit()
     conn.close()
-    return {"message": f"HWID {data.hwid} успешно активирован"}
+    return {"status": "ok"}
